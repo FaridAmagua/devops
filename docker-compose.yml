@@ -5,6 +5,7 @@ services:
       - "3000:3000"
     environment:
       PORT: 3000
+      DATABASE_URL: postgresql://autodm:autodm@postgres:5432/autodm?schema=public
     depends_on:
       - postgres
 
