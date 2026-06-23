@@ -2,9 +2,11 @@
   "name": "autodm-ai",
   "version": "0.1.0",
   "description": "AutoDM AI SaaS backend",
+  "type": "module",
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "lint": "eslint src/**/*.ts",
     "build": "tsc",
     "start": "node dist/server.js"
   },
@@ -17,7 +19,9 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.24",
+    "eslint": "^10.5.0",
     "tsx": "^4.7.1",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.62.0"
   }
 }
