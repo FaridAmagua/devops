@@ -1,8 +1,8 @@
 # AWS EC2 Runbook
 
-Runbook operativo para desplegar y mantener AutoDM AI en una instancia EC2 con Docker Compose.
+Runbook operativo para desplegar y mantener AutoDM AI en una instancia EC2 con Docker Compose y AWS Systems Manager.
 
-Este documento describe el flujo manual. Mas adelante este proceso se automatizara con GitHub Actions.
+El despliegue principal a preproduccion se ejecuta desde GitHub Actions usando OIDC y AWS Systems Manager Run Command. El flujo manual por SSH queda documentado como fallback operativo.
 
 ## Contexto
 
@@ -10,6 +10,9 @@ Arquitectura actual:
 
 ```text
 GitHub repository
+  -> GitHub Actions
+  -> AWS OIDC role
+  -> AWS Systems Manager Run Command
   -> EC2 Ubuntu
   -> Docker Compose
   -> API Node.js + PostgreSQL
@@ -38,6 +41,9 @@ En AWS:
 - Key pair creada para SSH.
 - Security Group creado.
 - Instancia EC2 creada con Ubuntu.
+- Rol IAM de EC2 con `AmazonSSMManagedInstanceCore`.
+- Rol IAM de GitHub Actions para ejecutar comandos SSM sobre la instancia de pre.
+- Proveedor OIDC de GitHub creado en IAM.
 
 En la instancia EC2:
 
@@ -45,8 +51,128 @@ En la instancia EC2:
 - Docker Compose v2 instalado.
 - Usuario `ubuntu` agregado al grupo `docker`.
 - Repositorio clonado desde GitHub.
+- Amazon SSM Agent activo y registrado.
 
-## Conexion SSH
+En GitHub:
+
+- Secret `AWS_ROLE_ARN`.
+- Secret `AWS_REGION`.
+- Secret `EC2_INSTANCE_ID`.
+
+## Deploy Automatico A Pre
+
+El workflow de deploy vive en:
+
+```text
+.github/workflows/deploy-pre.yml
+```
+
+Se ejecuta al hacer push a:
+
+```text
+pre
+```
+
+Flujo:
+
+```text
+push a pre
+  -> GitHub Actions
+  -> OIDC token
+  -> AssumeRole en AWS
+  -> SSM SendCommand
+  -> EC2 ejecuta deploy localmente
+```
+
+Comandos que SSM ejecuta dentro de EC2:
+
+```bash
+set -e
+cd /home/ubuntu/devops
+git fetch origin
+git checkout pre
+git pull origin pre
+docker compose up --build -d
+docker compose ps
+curl --fail http://localhost:3000/health
+```
+
+Para disparar un deploy:
+
+```bash
+git checkout pre
+git merge main
+git push
+git checkout main
+```
+
+GitHub Actions debe mostrar el workflow `Deploy Pre` en verde.
+
+## Verificar SSM En EC2
+
+Comprobar agente SSM dentro de la instancia:
+
+```bash
+sudo systemctl status snap.amazon-ssm-agent.amazon-ssm-agent.service
+```
+
+Debe aparecer:
+
+```text
+active (running)
+```
+
+Comprobar que la instancia tiene rol IAM asociado:
+
+```bash
+TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/
+```
+
+Resultado esperado:
+
+```text
+autodm-ai-ec2-ssm-role
+```
+
+Si el agente necesita refrescar credenciales:
+
+```bash
+sudo systemctl restart snap.amazon-ssm-agent.amazon-ssm-agent.service
+sudo journalctl -u snap.amazon-ssm-agent.amazon-ssm-agent.service -n 40 --no-pager
+```
+
+En AWS Systems Manager, una prueba basica con `AWS-RunShellScript` puede ejecutar:
+
+```bash
+whoami
+pwd
+hostname
+```
+
+## GitHub Secrets Actuales
+
+Secrets necesarios:
+
+```text
+AWS_ROLE_ARN
+AWS_REGION
+EC2_INSTANCE_ID
+```
+
+Secrets antiguos del flujo SSH que no deberian ser necesarios:
+
+```text
+EC2_HOST
+EC2_USER
+EC2_SSH_KEY
+```
+
+Una vez validado SSM/OIDC, eliminar especialmente `EC2_SSH_KEY` de GitHub Secrets.
+
+## Conexion SSH Manual
+
+SSH queda como fallback de administracion, no como mecanismo principal de deploy.
 
 Desde la maquina local:
 
@@ -266,6 +392,38 @@ Notas:
 
 ## Errores Comunes
 
+### GitHub Actions No Puede Conectar Por SSH
+
+Si aparece:
+
+```text
+dial tcp ...:22: i/o timeout
+```
+
+No abrir SSH a `0.0.0.0/0` como solucion permanente.
+
+El flujo actual debe usar:
+
+```text
+GitHub Actions -> OIDC -> AWS SSM -> EC2
+```
+
+### La Instancia No Aparece En Run Command
+
+Comprobar:
+
+- Rol IAM de EC2 asociado.
+- Politica `AmazonSSMManagedInstanceCore` en el rol de EC2.
+- SSM Agent activo.
+- Salida a internet desde la instancia.
+- Region correcta en Systems Manager.
+
+Si los logs muestran `AccessDeniedException`, reiniciar el agente tras asociar el rol:
+
+```bash
+sudo systemctl restart snap.amazon-ssm-agent.amazon-ssm-agent.service
+```
+
 ### Usar IP Incorrecta
 
 Para SSH hay que usar la IP publica de EC2, no la IP publica local detectada por "Mi IP".
@@ -320,6 +478,8 @@ Comprobar:
 - La IP publica local no ha cambiado.
 
 ## Flujo Manual Completo
+
+Este flujo se usa como fallback por SSH.
 
 ```bash
 cd ~/devops
