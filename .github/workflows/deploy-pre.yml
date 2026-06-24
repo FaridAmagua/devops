@@ -29,7 +29,7 @@ jobs:
           cat > ssm-parameters.json <<'JSON'
           {
             "commands": [
-              "sudo -u ubuntu -H bash -lc 'set -e; cd /home/ubuntu/devops; git fetch origin; git checkout pre; git pull origin pre; docker compose up --build -d; docker compose ps; for attempt in {1..30}; do curl --fail http://localhost:3000/health && exit 0; echo \"Waiting for API health check... attempt $attempt\"; sleep 2; done; docker compose logs api; exit 1'"
+              "sudo -u ubuntu -H bash -lc 'set -e; cd /home/ubuntu/devops; git fetch origin; git checkout pre; git pull origin pre; docker compose up --build -d; docker compose ps; HEALTHY=0; for attempt in {1..30}; do if curl --fail --silent --show-error http://localhost:3000/health; then HEALTHY=1; break; fi; echo \"Waiting for API health check... attempt $attempt\"; sleep 2; done; if [ \"$HEALTHY\" != \"1\" ]; then docker compose logs api; exit 1; fi'"
             ]
           }
           JSON
