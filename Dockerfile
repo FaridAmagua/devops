@@ -7,8 +7,10 @@ COPY package*.json ./
 RUN npm ci
 
 COPY tsconfig.json ./
+COPY prisma ./prisma
 COPY src ./src
 
+RUN npm run db:generate
 RUN npm run build
 
 EXPOSE 3000
