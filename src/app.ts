@@ -1,4 +1,5 @@
 import express from "express";
+import { errorHandler } from "./middleware/error-handler.js";
 import { workspacesRouter } from "./routes/workspaces.js";
 
 export const app = express();
@@ -12,3 +13,5 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/workspaces", workspacesRouter);
+
+app.use(errorHandler);
