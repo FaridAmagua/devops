@@ -92,6 +92,8 @@ cd /home/ubuntu/devops
 git fetch origin
 git checkout pre
 git pull origin pre
+docker compose up --build -d postgres
+docker compose run --rm api npx prisma migrate deploy
 docker compose up --build -d
 docker compose ps
 curl --fail http://localhost:3000/health
@@ -107,6 +109,48 @@ git checkout main
 ```
 
 GitHub Actions debe mostrar el workflow `Deploy Pre` en verde.
+
+## Migraciones Prisma En Deploy
+
+El deploy debe aplicar migraciones antes de dejar la API como version final.
+
+Comando usado en pre:
+
+```bash
+docker compose run --rm api npx prisma migrate deploy
+```
+
+Por que se ejecuta desde el servicio `api`:
+
+- La imagen de API contiene Node.js, Prisma CLI y el schema.
+- El contenedor tiene la variable `DATABASE_URL` definida por Docker Compose.
+- `migrate deploy` aplica migraciones pendientes sin crear nuevas migraciones.
+
+Diferencia importante:
+
+```text
+prisma migrate dev
+```
+
+Se usa en desarrollo local. Puede crear nuevas migraciones y esta pensado para iterar durante desarrollo.
+
+```text
+prisma migrate deploy
+```
+
+Se usa en preproduccion y produccion. Solo aplica migraciones existentes y versionadas.
+
+Si se despliega codigo que usa una tabla nueva pero no se ejecutan migraciones, la API puede fallar con errores como:
+
+```text
+The table public.Workspace does not exist in the current database.
+```
+
+Regla operativa:
+
+```text
+codigo nuevo + schema nuevo = deploy debe incluir migraciones
+```
 
 ## Verificar SSM En EC2
 
@@ -486,6 +530,8 @@ cd ~/devops
 git fetch origin
 git checkout pre
 git pull origin pre
+docker compose up --build -d postgres
+docker compose run --rm api npx prisma migrate deploy
 docker compose up --build -d
 docker compose ps
 curl http://localhost:3000/health
