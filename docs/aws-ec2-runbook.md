@@ -59,6 +59,82 @@ En GitHub:
 - Secret `AWS_REGION`.
 - Secret `EC2_INSTANCE_ID`.
 
+## CI Con PostgreSQL Temporal
+
+El workflow de CI vive en:
+
+```text
+.github/workflows/ci.yml
+```
+
+Se ejecuta en:
+
+```text
+main
+pre
+prod
+pull requests hacia main, pre y prod
+```
+
+El job usa un runner temporal de GitHub:
+
+```yaml
+runs-on: ubuntu-latest
+```
+
+Dentro del job se levanta PostgreSQL como service container:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+```
+
+Este PostgreSQL:
+
+- Solo existe durante el job.
+- No es la base de datos de EC2.
+- No es RDS.
+- No persiste datos al terminar.
+- No genera coste en AWS.
+
+Credenciales usadas en CI:
+
+```text
+POSTGRES_USER=autodm
+POSTGRES_PASSWORD=autodm
+POSTGRES_DB=autodm_test
+```
+
+Estas credenciales son aceptables porque pertenecen a una base efimera de test. No usar este patron para bases reales de preproduccion o produccion.
+
+Orden del CI:
+
+```bash
+npm ci
+npm run lint
+npx prisma migrate deploy
+npm test
+npm run build
+```
+
+El paso de migraciones prepara la base temporal antes de ejecutar tests de integracion.
+
+Los tests validan:
+
+- `GET /health`.
+- validacion de `POST /workspaces`.
+- creacion real de workspace en PostgreSQL.
+- lectura real con `GET /workspaces`.
+
+Regla operativa:
+
+```text
+tests de CI no deben escribir en pre ni prod
+```
+
+Cada pipeline debe usar recursos temporales o bases de test aisladas.
+
 ## Deploy Automatico A Pre
 
 El workflow de deploy vive en:
