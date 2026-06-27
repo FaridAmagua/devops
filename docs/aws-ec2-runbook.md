@@ -1,12 +1,12 @@
 # AWS EC2 Runbook
 
-Runbook operativo para desplegar y mantener AutoDM AI en una instancia EC2 con Docker Compose y AWS Systems Manager.
+Runbook operativo para desplegar y mantener AutoDM AI en una instancia EC2 con Docker Compose, RDS PostgreSQL y AWS Systems Manager.
 
-El despliegue principal a preproduccion se ejecuta desde GitHub Actions usando OIDC y AWS Systems Manager Run Command. El flujo manual por SSH queda documentado como fallback operativo.
+El despliegue principal a preproduccion se ejecuta desde GitHub Actions usando OIDC y AWS Systems Manager Run Command. El acceso por SSH queda como fallback operativo.
 
 ## Contexto
 
-Arquitectura actual:
+Arquitectura actual de preproduccion:
 
 ```text
 GitHub repository
@@ -15,7 +15,8 @@ GitHub repository
   -> AWS Systems Manager Run Command
   -> EC2 Ubuntu
   -> Docker Compose
-  -> API Node.js + PostgreSQL
+  -> API Node.js
+  -> RDS PostgreSQL privado
 ```
 
 Rama usada para la instancia de preproduccion:
@@ -24,26 +25,36 @@ Rama usada para la instancia de preproduccion:
 pre
 ```
 
-Servicios definidos en Docker Compose:
+Compose local:
 
 ```text
-api
-postgres
+docker-compose.yml
+  api
+  postgres
 ```
+
+Compose de preproduccion:
+
+```text
+docker-compose.pre.yml
+  api
+```
+
+En `pre`, PostgreSQL vive en RDS, no dentro de Docker Compose.
 
 ## Requisitos Previos
 
 En AWS:
 
 - MFA activo en root.
-- MFA activo en usuario IAM.
 - AWS Budget creado.
-- Key pair creada para SSH.
-- Security Group creado.
+- Security Group de EC2 creado.
 - Instancia EC2 creada con Ubuntu.
 - Rol IAM de EC2 con `AmazonSSMManagedInstanceCore`.
-- Rol IAM de GitHub Actions para ejecutar comandos SSM sobre la instancia de pre.
 - Proveedor OIDC de GitHub creado en IAM.
+- Rol IAM de GitHub Actions para ejecutar comandos SSM sobre la instancia de pre.
+- RDS PostgreSQL privado creado para pre.
+- Security Group de RDS permitiendo PostgreSQL `5432` solo desde el Security Group de EC2.
 
 En la instancia EC2:
 
@@ -52,12 +63,42 @@ En la instancia EC2:
 - Usuario `ubuntu` agregado al grupo `docker`.
 - Repositorio clonado desde GitHub.
 - Amazon SSM Agent activo y registrado.
+- Archivo `/home/ubuntu/devops/.env.pre` creado manualmente.
 
 En GitHub:
 
 - Secret `AWS_ROLE_ARN`.
 - Secret `AWS_REGION`.
 - Secret `EC2_INSTANCE_ID`.
+
+## Variables De Entorno En Pre
+
+El archivo real vive solo en EC2:
+
+```text
+/home/ubuntu/devops/.env.pre
+```
+
+Ejemplo:
+
+```text
+DATABASE_URL=postgresql://autodm:PASSWORD_ENCODED@autodm-ai-pre.c9mg4i4w61u4.eu-west-1.rds.amazonaws.com:5432/autodm?schema=public
+PORT=3000
+```
+
+Este archivo no debe subirse a Git.
+
+El repositorio solo contiene una plantilla:
+
+```text
+.env.pre.example
+```
+
+Si la password contiene caracteres especiales como `@`, `/`, `#`, `%` o `:`, hay que codificarla para URL. Si no, Prisma puede devolver:
+
+```text
+Error: P1000: Authentication failed against database server
+```
 
 ## CI Con PostgreSQL Temporal
 
@@ -118,22 +159,11 @@ npm test
 npm run build
 ```
 
-El paso de migraciones prepara la base temporal antes de ejecutar tests de integracion.
-
-Los tests validan:
-
-- `GET /health`.
-- validacion de `POST /workspaces`.
-- creacion real de workspace en PostgreSQL.
-- lectura real con `GET /workspaces`.
-
 Regla operativa:
 
 ```text
 tests de CI no deben escribir en pre ni prod
 ```
-
-Cada pipeline debe usar recursos temporales o bases de test aisladas.
 
 ## Deploy Automatico A Pre
 
@@ -160,7 +190,7 @@ push a pre
   -> EC2 ejecuta deploy localmente
 ```
 
-Comandos que SSM ejecuta dentro de EC2:
+Comandos equivalentes que SSM ejecuta dentro de EC2:
 
 ```bash
 set -e
@@ -168,10 +198,10 @@ cd /home/ubuntu/devops
 git fetch origin
 git checkout pre
 git pull origin pre
-docker compose up --build -d postgres
-docker compose run --rm api npx prisma migrate deploy
-docker compose up --build -d
-docker compose ps
+test -f .env.pre
+docker compose -f docker-compose.pre.yml run --rm api npx prisma migrate deploy
+docker compose -f docker-compose.pre.yml up --build -d --remove-orphans
+docker compose -f docker-compose.pre.yml ps
 curl --fail http://localhost:3000/health
 ```
 
@@ -184,7 +214,7 @@ git push
 git checkout main
 ```
 
-GitHub Actions debe mostrar el workflow `Deploy Pre` en verde.
+GitHub Actions debe mostrar `CI` y `Deploy Pre` en verde.
 
 ## Migraciones Prisma En Deploy
 
@@ -193,13 +223,13 @@ El deploy debe aplicar migraciones antes de dejar la API como version final.
 Comando usado en pre:
 
 ```bash
-docker compose run --rm api npx prisma migrate deploy
+docker compose -f docker-compose.pre.yml run --rm api npx prisma migrate deploy
 ```
 
 Por que se ejecuta desde el servicio `api`:
 
 - La imagen de API contiene Node.js, Prisma CLI y el schema.
-- El contenedor tiene la variable `DATABASE_URL` definida por Docker Compose.
+- El contenedor recibe `DATABASE_URL` desde `.env.pre`.
 - `migrate deploy` aplica migraciones pendientes sin crear nuevas migraciones.
 
 Diferencia importante:
@@ -216,16 +246,46 @@ prisma migrate deploy
 
 Se usa en preproduccion y produccion. Solo aplica migraciones existentes y versionadas.
 
-Si se despliega codigo que usa una tabla nueva pero no se ejecutan migraciones, la API puede fallar con errores como:
+Si se despliega codigo que usa una tabla nueva pero no se ejecutan migraciones, la API puede fallar con:
 
 ```text
 The table public.Workspace does not exist in the current database.
 ```
 
-Regla operativa:
+## RDS PostgreSQL En Pre
 
-```text
-codigo nuevo + schema nuevo = deploy debe incluir migraciones
+RDS es la base gestionada por AWS. En nuestro caso sustituye al contenedor `postgres` de pre.
+
+Ventajas:
+
+- La base no se reinicia con la app.
+- Backups y snapshots gestionados por AWS.
+- Separacion entre computo y datos.
+- Seguridad de red mas parecida a un entorno real.
+
+Decisiones tomadas:
+
+- RDS no tiene acceso publico.
+- El puerto `5432` no se abre a internet.
+- RDS solo acepta trafico desde el Security Group de EC2.
+- La API obtiene la conexion desde `.env.pre`.
+
+Comprobar conectividad desde EC2:
+
+```bash
+nc -vz autodm-ai-pre.c9mg4i4w61u4.eu-west-1.rds.amazonaws.com 5432
+```
+
+Conectar con `psql` desde EC2:
+
+```bash
+psql "host=autodm-ai-pre.c9mg4i4w61u4.eu-west-1.rds.amazonaws.com port=5432 dbname=autodm user=autodm sslmode=require"
+```
+
+Si `\l` falla por diferencia de versiones entre cliente y servidor, usar:
+
+```sql
+SELECT datname FROM pg_database;
 ```
 
 ## Verificar SSM En EC2
@@ -260,14 +320,6 @@ Si el agente necesita refrescar credenciales:
 ```bash
 sudo systemctl restart snap.amazon-ssm-agent.amazon-ssm-agent.service
 sudo journalctl -u snap.amazon-ssm-agent.amazon-ssm-agent.service -n 40 --no-pager
-```
-
-En AWS Systems Manager, una prueba basica con `AWS-RunShellScript` puede ejecutar:
-
-```bash
-whoami
-pwd
-hostname
 ```
 
 ## GitHub Secrets Actuales
@@ -325,8 +377,6 @@ $user = "$env:USERDOMAIN\$env:USERNAME"
 icacls .\autodm-ai-key.pem /grant:r "${user}:R"
 ```
 
-Despues reintentar SSH.
-
 ## Comprobar Docker
 
 Dentro de EC2:
@@ -378,56 +428,35 @@ La rama activa debe ser:
 pre
 ```
 
-Si no lo es:
-
-```bash
-git checkout pre
-```
-
-## Actualizar Codigo En Pre
+## Levantar La Aplicacion En Pre
 
 Dentro de `~/devops`:
 
 ```bash
-git fetch origin
-git checkout pre
-git pull origin pre
-```
-
-Comprobar ultimos commits:
-
-```bash
-git log --oneline --decorate -5
-```
-
-## Levantar La Aplicacion
-
-Dentro de `~/devops`:
-
-```bash
-docker compose up --build -d
+docker compose -f docker-compose.pre.yml up --build -d --remove-orphans
 ```
 
 Significado:
 
+- `-f docker-compose.pre.yml`: usa la configuracion de pre.
 - `up`: crea o arranca los servicios.
 - `--build`: reconstruye la imagen de la API.
 - `-d`: ejecuta en segundo plano.
+- `--remove-orphans`: limpia contenedores antiguos que ya no estan en el compose actual, como el antiguo `postgres`.
 
 ## Comprobar Estado
 
 ```bash
-docker compose ps
+docker compose -f docker-compose.pre.yml ps
 ```
 
-Los servicios esperados:
+Servicio esperado:
 
 ```text
 api
-postgres
 ```
 
-Ambos deben estar en estado `Up`.
+El servicio debe estar en estado `Up`.
 
 ## Probar Health Check
 
@@ -449,26 +478,20 @@ Desde navegador local:
 http://EC2_PUBLIC_IP:3000/health
 ```
 
-Si funciona dentro de EC2 pero no desde el navegador, revisar el Security Group.
+Si funciona dentro de EC2 pero no desde el navegador, revisar el Security Group de EC2.
 
 ## Ver Logs
 
 Logs de la API:
 
 ```bash
-docker compose logs api
-```
-
-Logs de PostgreSQL:
-
-```bash
-docker compose logs postgres
+docker compose -f docker-compose.pre.yml logs api
 ```
 
 Logs en tiempo real:
 
 ```bash
-docker compose logs -f api
+docker compose -f docker-compose.pre.yml logs -f api
 ```
 
 Salir de logs en tiempo real:
@@ -480,20 +503,12 @@ Ctrl + C
 ## Apagar Contenedores
 
 ```bash
-docker compose down
+docker compose -f docker-compose.pre.yml down
 ```
 
 Esto elimina contenedores y red de Docker Compose.
 
-No elimina volumenes por defecto.
-
-No usar salvo que se quiera borrar datos locales:
-
-```bash
-docker compose down -v
-```
-
-`-v` elimina volumenes, incluyendo datos de PostgreSQL.
+No elimina RDS.
 
 ## Detener La Instancia Para Ahorrar Costes
 
@@ -507,8 +522,8 @@ Notas:
 
 - Detener evita coste de computo EC2.
 - El volumen EBS puede seguir generando coste.
+- RDS sigue generando coste si queda encendido.
 - Terminar instancia elimina la instancia.
-- Si el volumen raiz tiene "Eliminar al terminar", tambien se elimina al terminar la instancia.
 
 ## Errores Comunes
 
@@ -538,35 +553,25 @@ Comprobar:
 - Salida a internet desde la instancia.
 - Region correcta en Systems Manager.
 
-Si los logs muestran `AccessDeniedException`, reiniciar el agente tras asociar el rol:
-
-```bash
-sudo systemctl restart snap.amazon-ssm-agent.amazon-ssm-agent.service
-```
-
-### Usar IP Incorrecta
-
-Para SSH hay que usar la IP publica de EC2, no la IP publica local detectada por "Mi IP".
-
-Correcto:
-
-```powershell
-ssh -i .\autodm-ai-key.pem ubuntu@EC2_PUBLIC_IP
-```
-
 ### Security Group Bloqueando Acceso
 
-Reglas de entrada esperadas:
+Reglas de entrada esperadas en EC2:
 
 ```text
 22   SSH        desde Mi IP
 3000 API Node   desde Mi IP
 ```
 
-No abrir:
+Regla de entrada esperada en RDS:
 
 ```text
-5432 PostgreSQL
+5432 PostgreSQL desde Security Group de EC2
+```
+
+No abrir RDS a:
+
+```text
+0.0.0.0/0
 ```
 
 ### Probar PostgreSQL En Navegador
@@ -579,13 +584,22 @@ http://EC2_PUBLIC_IP:5432
 
 PostgreSQL no habla HTTP. Usa protocolo propio de base de datos.
 
-### Instancia Sin Grupo Docker Aplicado
+### Error P1000 De Prisma
 
-Si `docker ps` necesita `sudo`, cerrar sesion y volver a entrar tras:
+Si aparece:
 
-```bash
-sudo usermod -aG docker ubuntu
+```text
+Authentication failed against database server
 ```
+
+Revisar:
+
+- usuario
+- password
+- nombre de base de datos
+- endpoint
+- si la password necesita URL encoding
+- si `.env.pre` esta actualizado en EC2
 
 ### La App Funciona En EC2 Pero No Desde Fuera
 
@@ -606,10 +620,9 @@ cd ~/devops
 git fetch origin
 git checkout pre
 git pull origin pre
-docker compose up --build -d postgres
-docker compose run --rm api npx prisma migrate deploy
-docker compose up --build -d
-docker compose ps
+test -f .env.pre
+docker compose -f docker-compose.pre.yml run --rm api npx prisma migrate deploy
+docker compose -f docker-compose.pre.yml up --build -d --remove-orphans
+docker compose -f docker-compose.pre.yml ps
 curl http://localhost:3000/health
 ```
-

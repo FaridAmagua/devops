@@ -16,6 +16,9 @@ Actualmente el proyecto tiene:
 - Tests con PostgreSQL temporal en CI.
 - Deploy automatico a `pre` usando OIDC + AWS Systems Manager.
 - Una instancia EC2 de preproduccion con Docker Compose.
+- RDS PostgreSQL privado para preproduccion.
+- Security Group de RDS restringido al Security Group de EC2.
+- Compose especifico de pre que ejecuta solo la API.
 
 Flujo actual:
 
@@ -26,8 +29,9 @@ push a pre
   -> CI
   -> Deploy Pre
   -> EC2 pre
-  -> Docker Compose
-  -> API + PostgreSQL
+  -> Docker Compose pre
+  -> API
+  -> RDS PostgreSQL pre
 ```
 
 ## Principio Principal
@@ -125,7 +129,7 @@ EC2 + Docker Compose
   -> Kubernetes/EKS
 ```
 
-### Fase Actual: EC2 + Docker Compose
+### Fase Alcanzada: EC2 + Docker Compose
 
 Ventajas:
 
@@ -135,14 +139,13 @@ Ventajas:
 
 Limitaciones:
 
-- app y DB viven en la misma instancia
-- backups manuales o limitados
+- la app sigue dependiendo de una unica instancia EC2
 - escalado dificil
-- recuperacion ante fallos mas debil
+- actualizaciones del servidor siguen siendo responsabilidad nuestra
 
-### Siguiente Paso Recomendado: RDS PostgreSQL
+### Fase Alcanzada: RDS PostgreSQL Para Pre
 
-Mover PostgreSQL fuera de Docker Compose.
+PostgreSQL ya fue movido fuera de Docker Compose en `pre`.
 
 Ventajas:
 
@@ -151,8 +154,9 @@ Ventajas:
 - metricas
 - separacion app/base de datos
 - mejor aproximacion a produccion real
+- seguridad de red mas restrictiva
 
-Cambios esperados:
+Estado actual:
 
 ```text
 EC2 Docker Compose:
@@ -162,9 +166,9 @@ RDS:
   PostgreSQL
 ```
 
-La app se conectaria a RDS usando `DATABASE_URL`.
+La app se conecta a RDS usando `DATABASE_URL` desde `.env.pre`, archivo que vive solo en EC2.
 
-### Siguiente Paso: ECR
+### Siguiente Paso Recomendado: ECR
 
 Publicar imagenes Docker en Amazon Elastic Container Registry.
 
@@ -290,7 +294,8 @@ GitHub Actions
   -> AWS SSM
   -> EC2 pre
   -> prisma migrate deploy
-  -> docker compose up
+  -> docker compose -f docker-compose.pre.yml up
+  -> RDS PostgreSQL pre
   -> health check
 ```
 
@@ -374,7 +379,7 @@ Secrets sensibles:
 
 ## Base De Datos
 
-Para produccion real:
+Para preproduccion actual:
 
 ```text
 RDS PostgreSQL
@@ -452,8 +457,8 @@ Las migraciones de base de datos pueden hacer rollback mas dificil. Evitar migra
 
 1. Mantener CI con PostgreSQL temporal.
 2. Mejorar tests de integracion.
-3. Crear RDS para pre.
-4. Mover `pre` de PostgreSQL en Docker a RDS.
+3. Crear RDS para pre. Completado.
+4. Mover `pre` de PostgreSQL en Docker a RDS. Completado.
 5. Crear ECR.
 6. Construir y publicar imagenes Docker versionadas.
 7. Evaluar ECS Fargate para pre.
